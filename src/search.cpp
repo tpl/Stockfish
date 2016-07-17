@@ -502,7 +502,7 @@ void Thread::search() {
                                && Time.elapsed() > Time.optimum() / 10;
 
               if (   rootMoves.size() == 1
-                  || Time.elapsed() > Time.optimum() * unstablePvFactor * improvingFactor / 705
+                  || Time.elapsed() > Time.optimum() * unstablePvFactor * improvingFactor / 715
                   || (mainThread->easyMovePlayed = doEasyMove))
               {
                   // If we are allowed to ponder do not stop the search now but

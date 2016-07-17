@@ -56,7 +56,7 @@ namespace {
     for (int i = 1; i < movesToGo; ++i)
         otherMovesImportance += move_importance(ply + 2 * i);
 
-    return int(std::max(myTime, 0) * moveImportance / (moveImportance + otherMovesImportance));  // Intel C++ asks for an explicit cast
+    return int(myTime * moveImportance / (moveImportance + otherMovesImportance));  // Intel C++ asks for an explicit cast
   }
 
 } // namespace
@@ -100,21 +100,19 @@ void TimeManagement::init(Search::LimitsType& limits, Color us, int ply)
       int MaxMTG = std::min(limits.movestogo, MoveHorizon);
       // Calculate thinking time for hypothetical "moves to go"-value
       int hypMyTime = limits.time[us] + (limits.inc[us] - moveOverhead) * (MaxMTG - 1);
-      int t1 = minThinkingTime + remaining(hypMyTime, MaxMTG, ply);
+      int t1 = remaining(hypMyTime, MaxMTG, ply);
 
       optimumTime = std::min(t1, optimumTime);
-      maximumTime = std::min(4 * optimumTime, maximumTime);
+      maximumTime = std::min(6 * optimumTime, maximumTime);
   }
 
   else
   {
-      int hypMyTime = limits.time[us] + limits.inc[us] * (MoveHorizon - 1);
+      int hypMyTime = limits.time[us] + limits.inc[us] * MoveHorizon;
 
-      optimumTime = minThinkingTime + remaining(hypMyTime, MoveHorizon, ply);
-      optimumTime = std::min(optimumTime, maximumTime / 16);
-      maximumTime = std::min(8 * optimumTime, maximumTime);
+      optimumTime = std::min(remaining(hypMyTime, MoveHorizon, ply), (maximumTime + 17 * limits.inc[us]) / 18);
+      maximumTime = std::min(6 * optimumTime, (maximumTime + 2 * limits.inc[us]) / 3);
   }
-
 
   if (Options["Ponder"])
       optimumTime += optimumTime / 4;

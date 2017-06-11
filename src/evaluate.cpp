@@ -517,7 +517,7 @@ namespace {
     const Bitboard TRank2BB = (Us == WHITE ? Rank2BB    : Rank7BB);
     const Bitboard TRank7BB = (Us == WHITE ? Rank7BB    : Rank2BB);
 
-    Bitboard b, weak, defended, stronglyProtected, safeThreats;
+    Bitboard b, weak, defended, stronglyProtected, safeThreats, unsafeThreats;
     Score score = SCORE_ZERO;
 
     // Non-pawn enemies attacked by a pawn
@@ -532,8 +532,14 @@ namespace {
 
         score += ThreatBySafePawn * popcount(safeThreats);
 
-        if (weak ^ safeThreats)
-            score += ThreatByHangingPawn;
+        unsafeThreats = (weak ^ safeThreats);
+
+        int unsafeThreatsCount = popcount(unsafeThreats);
+
+        if (unsafeThreats & ei.attackedBy[Them][ALL_PIECES])
+            unsafeThreatsCount -= (pos.side_to_move() == Them);
+
+        score += ThreatByHangingPawn * unsafeThreatsCount;
     }
 
     // Squares strongly protected by the opponent, either because they attack the

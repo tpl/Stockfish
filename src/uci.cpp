@@ -18,6 +18,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cassert>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -27,6 +28,7 @@
 #include "position.h"
 #include "search.h"
 #include "thread.h"
+#include "tt.h"
 #include "timeman.h"
 #include "uci.h"
 #include "syzygy/tbprobe.h"
@@ -113,6 +115,7 @@ namespace {
 
     Search::LimitsType limits;
     string token;
+    bool ponderMode = false;
 
     limits.startTime = now(); // As early as possible!
 
@@ -131,9 +134,9 @@ namespace {
         else if (token == "movetime")  is >> limits.movetime;
         else if (token == "mate")      is >> limits.mate;
         else if (token == "infinite")  limits.infinite = 1;
-        else if (token == "ponder")    limits.ponder = 1;
+        else if (token == "ponder")    ponderMode = true;
 
-    Threads.start_thinking(pos, States, limits);
+    Threads.start_thinking(pos, States, limits, ponderMode);
   }
 
 } // namespace
@@ -149,8 +152,9 @@ void UCI::loop(int argc, char* argv[]) {
 
   Position pos;
   string token, cmd;
+  Thread* uiThread = new Thread();
 
-  pos.set(StartFEN, false, &States->back(), Threads.main());
+  pos.set(StartFEN, false, &States->back(), uiThread);
 
   for (int i = 1; i < argc; ++i)
       cmd += std::string(argv[i]) + " ";
@@ -164,32 +168,25 @@ void UCI::loop(int argc, char* argv[]) {
       token.clear(); // getline() could return empty or blank line
       is >> skipws >> token;
 
-      // The GUI sends 'ponderhit' to tell us to ponder on the same move the
-      // opponent has played. In case Signals.stopOnPonderhit is set we are
-      // waiting for 'ponderhit' to stop the search (for instance because we
-      // already ran out of time), otherwise we should continue searching but
-      // switching from pondering to normal search.
+      // The GUI sends 'ponderhit' to tell us the user has played the expected move.
+      // So 'ponderhit' will be sent if we were told to ponder on the same move the
+      // user has played. We should continue searching but switch from pondering to
+      // normal search. In case Threads.stopOnPonderhit is set we are waiting for
+      // 'ponderhit' to stop the search, for instance if max search depth is reached.
       if (    token == "quit"
           ||  token == "stop"
-          || (token == "ponderhit" && Search::Signals.stopOnPonderhit))
-      {
-          Search::Signals.stop = true;
-          Threads.main()->start_searching(true); // Could be sleeping
-      }
+          || (token == "ponderhit" && Threads.stopOnPonderhit))
+          Threads.stop = true;
+
       else if (token == "ponderhit")
-          Search::Limits.ponder = 0; // Switch to normal search
+          Threads.ponder = false; // Switch to normal search
 
       else if (token == "uci")
           sync_cout << "id name " << engine_info(true)
                     << "\n"       << Options
                     << "\nuciok"  << sync_endl;
 
-      else if (token == "ucinewgame")
-      {
-          Search::clear();
-          Tablebases::init(Options["SyzygyPath"]);
-          Time.availableNodes = 0;
-      }
+      else if (token == "ucinewgame") Search::clear();
       else if (token == "isready")    sync_cout << "readyok" << sync_endl;
       else if (token == "go")         go(pos, is);
       else if (token == "position")   position(pos, is);
@@ -217,6 +214,7 @@ void UCI::loop(int argc, char* argv[]) {
   } while (token != "quit" && argc == 1); // Passed args have one-shot behaviour
 
   Threads.main()->wait_for_search_finished();
+  delete uiThread;
 }
 
 
@@ -228,6 +226,8 @@ void UCI::loop(int argc, char* argv[]) {
 ///           use negative values for y.
 
 string UCI::value(Value v) {
+
+  assert(-VALUE_INFINITE < v && v < VALUE_INFINITE);
 
   stringstream ss;
 

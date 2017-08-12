@@ -22,7 +22,6 @@
 #define THREAD_H_INCLUDED
 
 #include <atomic>
-#include <bitset>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -53,25 +52,23 @@ public:
   virtual ~Thread();
   virtual void search();
   void idle_loop();
-  void start_searching(bool resume = false);
+  void start_searching();
   void wait_for_search_finished();
-  void wait(std::atomic_bool& condition);
 
   Pawns::Table pawnsTable;
   Material::Table materialTable;
   Endgames endgames;
   size_t idx, PVIdx;
-  int maxPly, callsCnt;
-  uint64_t tbHits;
+  int selDepth;
+  std::atomic<uint64_t> nodes, tbHits;
 
   Position rootPos;
   Search::RootMoves rootMoves;
   Depth rootDepth;
   Depth completedDepth;
-  std::atomic_bool resetCalls;
-  MoveStats counterMoves;
-  HistoryStats history;
-  CounterMoveHistoryStats counterMoveHistory;
+  CounterMoveHistory counterMoves;
+  ButterflyHistory mainHistory;
+  ContinuationHistory contHistory;
 };
 
 
@@ -79,10 +76,12 @@ public:
 
 struct MainThread : public Thread {
   virtual void search();
+  void check_time();
 
   bool easyMovePlayed, failedLow;
   double bestMoveChanges;
   Value previousScore;
+  int callsCnt = 0;
 };
 
 
@@ -96,10 +95,12 @@ struct ThreadPool : public std::vector<Thread*> {
   void exit(); // be initialized and valid during the whole thread lifetime.
 
   MainThread* main() { return static_cast<MainThread*>(at(0)); }
-  void start_thinking(Position&, StateListPtr&, const Search::LimitsType&);
+  void start_thinking(Position&, StateListPtr&, const Search::LimitsType&, bool = false);
   void read_uci_options();
   uint64_t nodes_searched() const;
   uint64_t tb_hits() const;
+
+  std::atomic_bool stop, ponder, stopOnPonderhit;
 
 private:
   StateListPtr setupStates;

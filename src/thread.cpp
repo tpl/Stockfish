@@ -34,9 +34,9 @@ ThreadPool Threads; // Global object
 
 Thread::Thread() {
 
-  resetCalls = exit = false;
-  maxPly = callsCnt = 0;
-  tbHits = 0;
+  exit = false;
+  selDepth = 0;
+  nodes = tbHits = 0;
   idx = Threads.size(); // Start from 0
 
   std::unique_lock<Mutex> lk(mutex);
@@ -68,24 +68,12 @@ void Thread::wait_for_search_finished() {
 }
 
 
-/// Thread::wait() waits on sleep condition until condition is true
-
-void Thread::wait(std::atomic_bool& condition) {
-
-  std::unique_lock<Mutex> lk(mutex);
-  sleepCondition.wait(lk, [&]{ return bool(condition); });
-}
-
-
 /// Thread::start_searching() wakes up the thread that will start the search
 
-void Thread::start_searching(bool resume) {
+void Thread::start_searching() {
 
   std::unique_lock<Mutex> lk(mutex);
-
-  if (!resume)
-      searching = true;
-
+  searching = true;
   sleepCondition.notify_one();
 }
 
@@ -163,7 +151,7 @@ uint64_t ThreadPool::nodes_searched() const {
 
   uint64_t nodes = 0;
   for (Thread* th : *this)
-      nodes += th->rootPos.nodes_searched();
+      nodes += th->nodes.load(std::memory_order_relaxed);
   return nodes;
 }
 
@@ -174,7 +162,7 @@ uint64_t ThreadPool::tb_hits() const {
 
   uint64_t hits = 0;
   for (Thread* th : *this)
-      hits += th->tbHits;
+      hits += th->tbHits.load(std::memory_order_relaxed);
   return hits;
 }
 
@@ -183,11 +171,12 @@ uint64_t ThreadPool::tb_hits() const {
 /// and starts a new search, then returns immediately.
 
 void ThreadPool::start_thinking(Position& pos, StateListPtr& states,
-                                const Search::LimitsType& limits) {
+                                const Search::LimitsType& limits, bool ponderMode) {
 
   main()->wait_for_search_finished();
 
-  Search::Signals.stopOnPonderhit = Search::Signals.stop = false;
+  stopOnPonderhit = stop = false;
+  ponder = ponderMode;
   Search::Limits = limits;
   Search::RootMoves rootMoves;
 
@@ -210,7 +199,7 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states,
 
   for (Thread* th : Threads)
   {
-      th->maxPly = 0;
+      th->nodes = 0;
       th->tbHits = 0;
       th->rootDepth = DEPTH_ZERO;
       th->rootMoves = rootMoves;

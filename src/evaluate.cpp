@@ -232,6 +232,7 @@ namespace {
   const Score ThreatByAttackOnQueen = S( 42, 21);
   const Score HinderPassedPawn      = S(  8,  1);
   const Score TrappedBishopA1H1     = S( 50, 50);
+  const Score TrappedKing           = S(  0, 50);
 
   #undef S
   #undef V
@@ -515,6 +516,11 @@ namespace {
     // Penalty when our king is on a pawnless flank
     if (!(pos.pieces(PAWN) & KingFlank[kf]))
         score -= PawnlessFlank;
+
+    b = pos.attacks_from(KING, ksq) & ~attackedBy[Them][ALL_PIECES] & ~pos.pieces(Us);
+
+    if (popcount(b) < 2)
+        score -= TrappedKing;
 
     if (T)
         Trace::add(KING, Us, score);

@@ -864,8 +864,12 @@ namespace {
 
     score += mobility[WHITE] - mobility[BLACK];
 
-    score +=  evaluate_king<WHITE>()
-            - evaluate_king<BLACK>();
+    Score KingEval = evaluate_king<WHITE>() - evaluate_king<BLACK>();
+
+    score +=  KingEval;
+
+    if (abs(mg_value(KingEval) + eg_value(KingEval)) > RookValueEg)
+        score += KingEval;
 
     score +=  evaluate_threats<WHITE>()
             - evaluate_threats<BLACK>();

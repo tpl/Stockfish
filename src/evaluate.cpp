@@ -179,6 +179,7 @@ namespace {
   const Score TrappedRook       = S( 92,  0);
   const Score WeakQueen         = S( 50, 10);
   const Score WeakUnopposedPawn = S(  5, 25);
+  const Score BadBishop         = S( 16, 16);
 
 #undef S
 
@@ -349,6 +350,22 @@ namespace {
             {
                 // Penalty according to number of pawns on the same color square as the bishop
                 score -= BishopPawns * pe->pawns_on_same_color_squares(Us, s);
+
+                if (   pos.count<BISHOP>(Us) == 1)
+                {
+                    Rank bishopRank = relative_rank(Us, s);
+                    Bitboard pbp = pos.attacks_from<BISHOP>(s) & pos.pieces(Us, PAWN);
+                    bool badBishop = false;
+                    while (pbp)
+                    {
+                       Square bs = pop_lsb(&pbp);
+                       Rank bsr = relative_rank(Us, bs);
+                       if (bsr > bishopRank && bsr <= RANK_4)
+                           badBishop = true;
+                    }
+                    if (badBishop)
+                        score -= BadBishop * pe->pawns_on_same_color_squares(Us, s);
+                }
 
                 // Bonus for bishop on a long diagonal which can "see" both center squares
                 if (more_than_one(Center & (attacks_bb<BISHOP>(s, pos.pieces(PAWN)) | s)))

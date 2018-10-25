@@ -846,7 +846,11 @@ namespace {
 
                 // If the qsearch held perform the regular search
                 if (value >= rbeta)
+                {
+                    thisThread->nmpMinPly = MAX_PLY;
                     value = -search<NonPV>(pos, ss+1, -rbeta, -rbeta+1, depth - 4 * ONE_PLY, !cutNode);
+                    thisThread->nmpMinPly = 0;
+                }
 
                 pos.undo_move(move);
 

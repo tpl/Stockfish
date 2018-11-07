@@ -85,13 +85,6 @@ namespace {
     return d > 17 ? 0 : 29 * d * d + 138 * d - 134;
   }
 
-  // Add a small random component to draw evaluations to keep search dynamic 
-  // and to avoid 3fold-blindness.
-  Value value_draw(Depth depth, Thread* thisThread) {
-    return depth < 4 ? VALUE_DRAW 
-                     : VALUE_DRAW + Value(2 * (thisThread->nodes.load(std::memory_order_relaxed) % 2) - 1);
-  }
-
   // Skill structure is used to implement strength limit
   struct Skill {
     explicit Skill(int l) : level(l) {}
@@ -401,11 +394,9 @@ void Thread::search() {
           // Start with a small aspiration window and, in the case of a fail
           // high/low, re-search with a bigger window until we don't fail
           // high/low anymore.
-          int failedHighCnt = 0;
           while (true)
           {
-              Depth adjustedDepth = std::max(ONE_PLY, rootDepth - failedHighCnt * ONE_PLY);
-              bestValue = ::search<PV>(rootPos, ss, alpha, beta, adjustedDepth, false);
+              bestValue = ::search<PV>(rootPos, ss, alpha, beta, rootDepth, false);
 
               // Bring the best move to the front. It is critical that sorting
               // is done with a stable algorithm because all the values but the
@@ -438,17 +429,13 @@ void Thread::search() {
 
                   if (mainThread)
                   {
-                      failedHighCnt = 0;
                       failedLow = true;
                       Threads.stopOnPonderhit = false;
                   }
               }
               else if (bestValue >= beta)
-              {
                   beta = std::min(bestValue + delta, VALUE_INFINITE);
-                  if (mainThread)
-                	  ++failedHighCnt;
-              }
+
               else
                   break;
 
@@ -541,17 +528,17 @@ namespace {
 
     constexpr bool PvNode = NT == PV;
     const bool rootNode = PvNode && ss->ply == 0;
+    bool gameCycle = false;
 
     // Check if we have an upcoming move which draws by repetition, or
     // if the opponent had an alternative move earlier to this position.
-    if (   pos.rule50_count() >= 3
-        && alpha < VALUE_DRAW
-        && !rootNode
-        && pos.has_game_cycle(ss->ply))
+    if (!rootNode && pos.has_game_cycle(ss->ply))
     {
-        alpha = value_draw(depth, pos.this_thread());
-        if (alpha >= beta)
-            return alpha;
+        if (VALUE_DRAW >= beta)
+            return VALUE_DRAW;
+
+        alpha = std::max(alpha, VALUE_DRAW);
+        gameCycle = true;
     }
 
     // Dive into quiescence search when the depth reaches zero
@@ -598,8 +585,8 @@ namespace {
         if (   Threads.stop.load(std::memory_order_relaxed)
             || pos.is_draw(ss->ply)
             || ss->ply >= MAX_PLY)
-            return (ss->ply >= MAX_PLY && !inCheck) ? evaluate(pos) 
-                                                    : value_draw(depth, pos.this_thread());
+            return (ss->ply >= MAX_PLY && !inCheck) ? evaluate(pos)
+                                                    : VALUE_DRAW;
 
         // Step 3. Mate distance pruning. Even if we mate at the next move our score
         // would be at best mate_in(ss->ply+1), but if alpha is already bigger because
@@ -640,9 +627,12 @@ namespace {
 
     // At non-PV nodes we check for an early TT cutoff
     if (  !PvNode
+        && !gameCycle
         && ttHit
+        && alpha != VALUE_DRAW
         && tte->depth() >= depth
         && ttValue != VALUE_NONE // Possible in case of TT access race
+        && (ttValue != VALUE_DRAW || ttValue >= beta)
         && (ttValue >= beta ? (tte->bound() & BOUND_LOWER)
                             : (tte->bound() & BOUND_UPPER)))
     {
@@ -754,6 +744,7 @@ namespace {
 
     // Step 7. Razoring (~2 Elo)
     if (   depth < 2 * ONE_PLY
+        && !gameCycle
         && eval <= alpha - RazorMargin)
         return qsearch<NT>(pos, ss, alpha, beta);
 
@@ -762,6 +753,7 @@ namespace {
 
     // Step 8. Futility pruning: child node (~30 Elo)
     if (   !rootNode
+        && !gameCycle
         &&  depth < 7 * ONE_PLY
         &&  eval - futility_margin(depth, improving) >= beta
         &&  eval < VALUE_KNOWN_WIN) // Do not return unproven wins
@@ -769,6 +761,7 @@ namespace {
 
     // Step 9. Null move search with verification search (~40 Elo)
     if (   !PvNode
+        && !gameCycle
         && (ss-1)->currentMove != MOVE_NULL
         && (ss-1)->statScore < 23200
         &&  eval >= beta
@@ -820,6 +813,7 @@ namespace {
     // If we have a good enough capture and a reduced search returns a value
     // much above beta, we can (almost) safely prune the previous move.
     if (   !PvNode
+        && !gameCycle
         &&  depth >= 5 * ONE_PLY
         &&  abs(beta) < VALUE_MATE_IN_MAX_PLY)
     {
@@ -856,6 +850,7 @@ namespace {
 
     // Step 11. Internal iterative deepening (~2 Elo)
     if (    depth >= 8 * ONE_PLY
+        && !gameCycle
         && !ttMove)
     {
         search<NT>(pos, ss, alpha, beta, depth - 7 * ONE_PLY, cutNode);
@@ -956,7 +951,7 @@ moves_loop: // When in check, search starts from here
               && (!pos.advanced_pawn_push(move) || pos.non_pawn_material() >= Value(5000)))
           {
               // Move count based pruning (~30 Elo)
-              if (moveCountPruning)
+              if (moveCountPruning && !gameCycle)
               {
                   skipQuiets = true;
                   continue;
@@ -1007,6 +1002,7 @@ moves_loop: // When in check, search starts from here
       // re-searched at full depth.
       if (    depth >= 3 * ONE_PLY
           &&  moveCount > 1
+          && !gameCycle
           && (!captureOrPromotion || moveCountPruning))
       {
           Depth r = reduction<PvNode>(improving, depth, moveCount);
@@ -1259,8 +1255,10 @@ moves_loop: // When in check, search starts from here
 
     if (  !PvNode
         && ttHit
+        && alpha != VALUE_DRAW
         && tte->depth() >= ttDepth
         && ttValue != VALUE_NONE // Only in case of TT access race
+        && (ttValue != VALUE_DRAW || ttValue >= beta)
         && (ttValue >= beta ? (tte->bound() & BOUND_LOWER)
                             : (tte->bound() & BOUND_UPPER)))
         return ttValue;

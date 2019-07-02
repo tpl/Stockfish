@@ -41,7 +41,7 @@ namespace Zobrist {
   Key psq[PIECE_NB][SQUARE_NB];
   Key enpassant[FILE_NB];
   Key castling[CASTLING_RIGHT_NB];
-  Key side, noPawns;
+  Key side, noPawns, repetition;
 }
 
 namespace {
@@ -166,6 +166,7 @@ void Position::init() {
 
   Zobrist::side = rng.rand<Key>();
   Zobrist::noPawns = rng.rand<Key>();
+  Zobrist::repetition = rng.rand<Key>();
 
   // Prepare the cuckoo tables
   std::memset(cuckoo, 0, sizeof(cuckoo));
@@ -891,6 +892,13 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
               break;
           }
       }
+  }
+
+  if (st->repetition > 0)
+  {
+      k ^= Zobrist::repetition;
+
+      st->key = k;
   }
 
   assert(pos_is_ok());

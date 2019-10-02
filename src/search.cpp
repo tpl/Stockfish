@@ -417,7 +417,8 @@ void Thread::search() {
               beta  = std::min(previousScore + delta, VALUE_INFINITE);
 
               // Adjust contempt based on root move's previousScore (dynamic contempt)
-              int dct = ct + 86 * previousScore / (abs(previousScore) + 176);
+              int dt = Options["Dynamic Contempt"];
+              int dct = ct + dt * (86 * previousScore / (abs(previousScore) + 176));
 
               contempt = (us == WHITE ?  make_score(dct, dct / 2)
                                       : -make_score(dct, dct / 2));
@@ -566,18 +567,6 @@ namespace {
     constexpr bool PvNode = NT == PV;
     const bool rootNode = PvNode && ss->ply == 0;
 
-    // Check if we have an upcoming move which draws by repetition, or
-    // if the opponent had an alternative move earlier to this position.
-    if (   pos.rule50_count() >= 3
-        && alpha < VALUE_DRAW
-        && !rootNode
-        && pos.has_game_cycle(ss->ply))
-    {
-        alpha = value_draw(pos.this_thread());
-        if (alpha >= beta)
-            return alpha;
-    }
-
     // Dive into quiescence search when the depth reaches zero
     if (depth < ONE_PLY)
         return qsearch<NT>(pos, ss, alpha, beta);
@@ -595,7 +584,7 @@ namespace {
     Move ttMove, move, excludedMove, bestMove;
     Depth extension, newDepth;
     Value bestValue, value, ttValue, eval, maxValue;
-    bool ttHit, ttPv, inCheck, givesCheck, improving, doLMR;
+    bool ttHit, ttPv, inCheck, givesCheck, improving, doLMR, gameCycle;
     bool captureOrPromotion, doFullDepthSearch, moveCountPruning, ttCapture;
     Piece movedPiece;
     int moveCount, captureCount, quietCount, singularLMR;
@@ -607,6 +596,7 @@ namespace {
     moveCount = captureCount = quietCount = singularLMR = ss->moveCount = 0;
     bestValue = -VALUE_INFINITE;
     maxValue = VALUE_INFINITE;
+    gameCycle = false;
 
     // Check for the available remaining time
     if (thisThread == Threads.main())
@@ -616,12 +606,36 @@ namespace {
     if (PvNode && thisThread->selDepth < ss->ply + 1)
         thisThread->selDepth = ss->ply + 1;
 
+    excludedMove = ss->excludedMove;
+    posKey = pos.key() ^ Key(excludedMove << 16); // Isn't a very good hash
+    tte = TT.probe(posKey, ttHit);
+    ttValue = ttHit ? value_from_tt(tte->value(), ss->ply) : VALUE_NONE;
+    ttMove =  rootNode ? thisThread->rootMoves[thisThread->pvIdx].pv[0]
+            : ttHit    ? tte->move() : MOVE_NONE;
+    ttPv = PvNode || (ttHit && tte->is_pv());
+
     if (!rootNode)
     {
+        // Check if we have an upcoming move which draws by repetition, or
+        // if the opponent had an alternative move earlier to this position.
+        if (pos.has_game_cycle(ss->ply))
+        {
+            if (VALUE_DRAW >= beta)
+            {
+                tte->save(posKey, VALUE_DRAW, ttPv, BOUND_EXACT,
+                          depth, MOVE_NONE, VALUE_NONE);
+
+                return VALUE_DRAW;
+            }
+            gameCycle = true;
+            alpha = std::max(alpha, VALUE_DRAW);
+        }
+
+        if (pos.is_draw(ss->ply))
+            return VALUE_DRAW;
+
         // Step 2. Check for aborted search and immediate draw
-        if (   Threads.stop.load(std::memory_order_relaxed)
-            || pos.is_draw(ss->ply)
-            || ss->ply >= MAX_PLY)
+        if (   Threads.stop.load(std::memory_order_relaxed) || ss->ply >= MAX_PLY)
             return (ss->ply >= MAX_PLY && !inCheck) ? evaluate(pos)
                                                     : value_draw(pos.this_thread());
 
@@ -657,17 +671,11 @@ namespace {
     // Step 4. Transposition table lookup. We don't want the score of a partial
     // search to overwrite a previous full search TT value, so we use a different
     // position key in case of an excluded move.
-    excludedMove = ss->excludedMove;
-    posKey = pos.key() ^ Key(excludedMove << 16); // Isn't a very good hash
-    tte = TT.probe(posKey, ttHit);
-    ttValue = ttHit ? value_from_tt(tte->value(), ss->ply) : VALUE_NONE;
-    ttMove =  rootNode ? thisThread->rootMoves[thisThread->pvIdx].pv[0]
-            : ttHit    ? tte->move() : MOVE_NONE;
-    ttPv = PvNode || (ttHit && tte->is_pv());
 
     // At non-PV nodes we check for an early TT cutoff
     if (  !PvNode
         && ttHit
+        && !gameCycle
         && tte->depth() >= depth
         && ttValue != VALUE_NONE // Possible in case of TT access race
         && (ttValue >= beta ? (tte->bound() & BOUND_LOWER)
@@ -783,9 +791,13 @@ namespace {
         tte->save(posKey, VALUE_NONE, ttPv, BOUND_NONE, DEPTH_NONE, MOVE_NONE, eval);
     }
 
+    if (gameCycle)
+        ss->staticEval = eval = ss->staticEval * std::max(0, (100 - pos.rule50_count())) / 100;
+
     // Step 7. Razoring (~2 Elo)
     if (   !rootNode // The required rootNode PV handling is not available in qsearch
         &&  depth < 2 * ONE_PLY
+        &&  !gameCycle
         &&  eval <= alpha - RazorMargin)
         return qsearch<NT>(pos, ss, alpha, beta);
 
@@ -795,6 +807,7 @@ namespace {
     // Step 8. Futility pruning: child node (~30 Elo)
     if (   !PvNode
         &&  depth < 7 * ONE_PLY
+        &&  !gameCycle
         &&  eval - futility_margin(depth, improving) >= beta
         &&  eval < VALUE_KNOWN_WIN) // Do not return unproven wins
         return eval;
@@ -951,6 +964,10 @@ moves_loop: // When in check, search starts from here
 
       // Step 13. Extensions (~70 Elo)
 
+      if (   gameCycle
+          && (depth < 5 * ONE_PLY || PvNode))
+          extension = (2 - (ss->ply % 2 == 0 && !PvNode)) * ONE_PLY;
+
       // Singular extension search (~60 Elo). If all moves but one fail low on a
       // search of (alpha-s, beta-s), and just one fails high on (alpha, beta),
       // then that move is singular and should be extended. To verify this we do
@@ -959,6 +976,7 @@ moves_loop: // When in check, search starts from here
       if (    depth >= 6 * ONE_PLY
           &&  move == ttMove
           && !rootNode
+          && !gameCycle
           && !excludedMove // Avoid recursive singular search
        /* &&  ttValue != VALUE_NONE Already implicit in the next condition */
           &&  abs(ttValue) < VALUE_KNOWN_WIN
@@ -1077,6 +1095,7 @@ moves_loop: // When in check, search starts from here
       // Step 16. Reduced depth search (LMR). If the move fails high it will be
       // re-searched at full depth.
       if (    depth >= 3 * ONE_PLY
+          && !gameCycle
           &&  moveCount > 1 + 2 * rootNode
           && (!rootNode || thisThread->best_move_count(move) == 0)
           && (  !captureOrPromotion
@@ -1325,7 +1344,7 @@ moves_loop: // When in check, search starts from here
     Move ttMove, move, bestMove;
     Depth ttDepth;
     Value bestValue, value, ttValue, futilityValue, futilityBase, oldAlpha;
-    bool ttHit, pvHit, inCheck, givesCheck, evasionPrunable;
+    bool ttHit, pvHit, inCheck, givesCheck, evasionPrunable, gameCycle;
     int moveCount;
 
     if (PvNode)
@@ -1340,10 +1359,22 @@ moves_loop: // When in check, search starts from here
     bestMove = MOVE_NONE;
     inCheck = pos.checkers();
     moveCount = 0;
+    gameCycle = false;
+
+    if (pos.has_game_cycle(ss->ply))
+    {
+       if (VALUE_DRAW >= beta)
+           return VALUE_DRAW;
+
+       alpha = std::max(alpha, VALUE_DRAW);
+       gameCycle = true;
+    }
+
+    if (pos.is_draw(ss->ply))
+        return VALUE_DRAW;
 
     // Check for an immediate draw or maximum ply reached
-    if (   pos.is_draw(ss->ply)
-        || ss->ply >= MAX_PLY)
+    if (ss->ply >= MAX_PLY)
         return (ss->ply >= MAX_PLY && !inCheck) ? evaluate(pos) : VALUE_DRAW;
 
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
@@ -1362,6 +1393,7 @@ moves_loop: // When in check, search starts from here
 
     if (  !PvNode
         && ttHit
+        && !gameCycle
         && tte->depth() >= ttDepth
         && ttValue != VALUE_NONE // Only in case of TT access race
         && (ttValue >= beta ? (tte->bound() & BOUND_LOWER)
@@ -1407,6 +1439,9 @@ moves_loop: // When in check, search starts from here
 
         futilityBase = bestValue + 153;
     }
+
+    if (gameCycle && !inCheck)
+        ss->staticEval = bestValue = ss->staticEval * std::max(0, (100 - pos.rule50_count())) / 100;
 
     const PieceToHistory* contHist[] = { (ss-1)->continuationHistory, (ss-2)->continuationHistory,
                                           nullptr, (ss-4)->continuationHistory,
